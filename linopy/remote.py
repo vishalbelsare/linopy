@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 Created on Sun Feb 13 21:34:55 2022.
 
@@ -9,6 +8,7 @@ Created on Sun Feb 13 21:34:55 2022.
 import logging
 import tempfile
 from dataclasses import dataclass
+from typing import Callable, Union
 
 from linopy.io import read_netcdf
 
@@ -17,8 +17,6 @@ try:
     import paramiko
 except ImportError:
     paramiko_present = False
-    pass
-
 logger = logging.getLogger(__name__)
 
 command = """
@@ -92,13 +90,14 @@ class RemoteHandler:
     >>> import linopy
     >>> from linopy import Model
     >>> from numpy import arange
+    >>> from xarray import DataArray
     >>>
     >>> N = 10
     >>> m = Model()
     >>> coords = [arange(N), arange(N)]
     >>> x = m.add_variables(coords=coords)
     >>> y = m.add_variables(coords=coords)
-    >>> con1 = m.add_constraints(x - y >= arange(N))
+    >>> con1 = m.add_constraints(x - y >= DataArray(arange(N)))
     >>> con2 = m.add_constraints(x + y >= 0)
     >>> obj = m.add_objective((2 * x + y).sum())
     >>>
@@ -112,13 +111,13 @@ class RemoteHandler:
     >>> m = handler.solve_on_remote(m)  # doctest: +SKIP
     """
 
-    hostname: str = None
+    hostname: str
     port: int = 22
-    username: str = None
-    password: str = None
-    client: "paramiko.SSHClient" = None
+    username: Union[str, None] = None
+    password: Union[str, None] = None
+    client: Union["paramiko.SSHClient", None] = None
 
-    python_script: callable = command.format
+    python_script: Callable = command.format
     python_executable: str = "python"
     python_file: str = "/tmp/linopy-execution.py"
 
@@ -144,7 +143,8 @@ class RemoteHandler:
         self.sftp_client = self.client.open_sftp()
 
     def __del__(self):
-        self.client.close()
+        if self.client is not None:
+            self.client.close()
 
     def write_python_file_on_remote(self, **solve_kwargs):
         """
@@ -154,7 +154,7 @@ class RemoteHandler:
         logger.info(f"Saving python script at {self.python_file} on remote")
         script_kwargs = dict(
             model_unsolved_file=self.model_unsolved_file,
-            solve_kwargs="**" + str(solve_kwargs),
+            solve_kwargs=f"**{solve_kwargs}",
             model_solved_file=self.model_solved_file,
         )
         with self.sftp_client.open(self.python_file, "w") as fn:
@@ -176,7 +176,7 @@ class RemoteHandler:
         cmd = cmd.strip("\n")
         self.stdin.write(cmd + "\n")
         finish = "End of stdout. Exit Status"
-        echo_cmd = "echo {} $?".format(finish)
+        echo_cmd = f"echo {finish} $?"
         self.stdin.write(echo_cmd + "\n")
         self.stdin.flush()
 
@@ -187,10 +187,10 @@ class RemoteHandler:
             if line.endswith(cmd):
                 # up to now everything was login and stdin
                 print_stdout = True
-            elif str(line).startswith(finish):
-                exit_status = int(str(line).rsplit(maxsplit=1)[1])
+            elif line.startswith(finish):
+                exit_status = int(line.rsplit(maxsplit=1)[1])
                 break
-            elif not finish in line and print_stdout:
+            elif finish not in line and print_stdout:
                 print(line)
 
         if exit_status:
@@ -222,7 +222,7 @@ class RemoteHandler:
         self.write_python_file_on_remote(**kwargs)
         self.write_model_on_remote(model)
 
-        command = self.python_executable + " " + self.python_file
+        command = f"{self.python_executable} {self.python_file}"
 
         logger.info("Solving model on remote.")
         self.execute(command)

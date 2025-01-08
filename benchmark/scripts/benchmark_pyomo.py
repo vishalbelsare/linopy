@@ -1,26 +1,32 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 Created on Fri Nov 19 17:40:33 2021.
 
 @author: fabian
 """
 
-
 from common import profile
 from numpy import arange
-from pyomo.environ import ConcreteModel, Constraint, Objective, Set, Var
+from numpy.random import default_rng
+from pyomo.environ import (
+    Binary,
+    ConcreteModel,
+    Constraint,
+    Objective,
+    Set,
+    Var,
+    maximize,
+)
 from pyomo.opt import SolverFactory
 
+# Random seed for reproducibility
+rng = default_rng(125)
 
-def model(n, solver, integerlabels):
+
+def basic_model(n, solver):
     m = ConcreteModel()
-    if integerlabels:
-        m.i = Set(initialize=arange(n))
-        m.j = Set(initialize=arange(n))
-    else:
-        m.i = Set(initialize=arange(n).astype(float))
-        m.j = Set(initialize=arange(n).astype(str))
+    m.i = Set(initialize=arange(n))
+    m.j = Set(initialize=arange(n))
 
     m.x = Var(m.i, m.j, bounds=(None, None))
     m.y = Var(m.i, m.j, bounds=(None, None))
@@ -40,17 +46,43 @@ def model(n, solver, integerlabels):
 
     opt = SolverFactory(solver)
     opt.solve(m)
-    return
+    return m.obj()
+
+
+def knapsack_model(n, solver):
+    m = ConcreteModel()
+    m.i = Set(initialize=arange(n))
+
+    m.x = Var(m.i, domain=Binary)
+    m.weight = rng.integers(1, 100, size=n)
+    m.value = rng.integers(1, 100, size=n)
+
+    def bound1(m):
+        return sum(m.x[i] * m.weight[i] for i in m.i) <= 200
+
+    def objective(m):
+        return sum(m.x[i] * m.value[i] for i in m.i)
+
+    m.con1 = Constraint(rule=bound1)
+    m.obj = Objective(rule=objective, sense=maximize)
+
+    opt = SolverFactory(solver)
+    opt.solve(m)
+    return m.obj()
 
 
 if __name__ == "__main__":
-    solver = snakemake.wildcards.solver
-    integerlabels = snakemake.params.integerlabels
+    solver = snakemake.config["solver"]
+
+    if snakemake.config["benchmark"] == "basic":
+        model = basic_model
+    elif snakemake.config["benchmark"] == "knapsack":
+        model = knapsack_model
 
     # dry run first
-    model(2, solver, integerlabels)
+    model(2, solver)
 
-    res = profile(snakemake.params.nrange, model, solver, integerlabels)
+    res = profile(snakemake.params.nrange, model, solver)
     res["API"] = "pyomo"
     res = res.rename_axis("N").reset_index()
 

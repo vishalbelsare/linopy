@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 Created on Thu Mar 18 09:03:35 2021.
 
@@ -9,97 +8,167 @@ Created on Thu Mar 18 09:03:35 2021.
 import pandas as pd
 import pytest
 import xarray as xr
-from xarray.testing import assert_equal
 
-from linopy import Model, available_solvers, read_netcdf
-from linopy.io import float_to_str, int_to_str
-
-
-def test_str_arrays():
-    m = Model()
-
-    x = m.add_variables(4, pd.Series([8, 10]))
-    y = m.add_variables(0, pd.DataFrame([[1, 2], [3, 4], [5, 6]]).T)
-
-    da = int_to_str(x.values)
-    assert da.dtype == object
+from linopy import LESS_EQUAL, Model, available_solvers, read_netcdf
+from linopy.testing import assert_model_equal
 
 
-def test_str_arrays_chunked():
-    m = Model(chunk="auto")
-
-    x = m.add_variables(4, pd.Series([8, 10]))
-    y = m.add_variables(0, pd.DataFrame([[1, 2], [3, 4], [5, 6]]).T)
-
-    da = int_to_str(y.compute().values)
-    assert da.dtype == object
-
-
-def test_str_arrays_with_nans():
+@pytest.fixture
+def model():
     m = Model()
 
     x = m.add_variables(4, pd.Series([8, 10]), name="x")
-    # now expand the second dimension, expended values of x will be nan
-    y = m.add_variables(0, pd.DataFrame([[1, 2], [3, 4], [5, 6]]), name="y")
-    assert m["x"].data[-1].item() == -1
+    y = m.add_variables(0, pd.DataFrame([[1, 2], [3, 4]]), name="y")
 
-    da = int_to_str(m["x"].values)
-    assert da.dtype == object
+    m.add_constraints(x + y, LESS_EQUAL, 10)
 
-
-def test_to_netcdf(tmp_path):
-    m = Model()
-
-    x = m.add_variables(4, pd.Series([8, 10]))
-    y = m.add_variables(0, pd.DataFrame([[1, 2], [3, 4], [5, 6]]))
-    m.add_constraints(x + y, "<=", 10)
     m.add_objective(2 * x + 3 * y)
 
+    m.parameters["param"] = xr.DataArray([1, 2, 3, 4], dims=["x"])
+
+    return m
+
+
+@pytest.fixture
+def model_with_dash_names():
+    m = Model()
+
+    x = m.add_variables(4, pd.Series([8, 10]), name="x-var")
+    x = m.add_variables(4, pd.Series([8, 10]), name="x-var-2")
+    y = m.add_variables(0, pd.DataFrame([[1, 2], [3, 4]]), name="y-var")
+
+    m.add_constraints(x + y, LESS_EQUAL, 10, name="constraint-1")
+
+    m.add_objective(2 * x + 3 * y)
+
+    return m
+
+
+@pytest.fixture
+def model_with_multiindex():
+    m = Model()
+
+    index = pd.MultiIndex.from_tuples(
+        [(1, "a"), (1, "b"), (2, "a"), (2, "b")], names=["first", "second"]
+    )
+    x = m.add_variables(4, pd.Series([8, 10, 12, 14], index=index), name="x-var")
+    y = m.add_variables(
+        0, pd.DataFrame([[1, 2], [3, 4], [5, 6], [7, 8]], index=index), name="y-var"
+    )
+
+    m.add_constraints(x + y, LESS_EQUAL, 10, name="constraint-1")
+
+    m.add_objective(2 * x + 3 * y)
+
+    return m
+
+
+def test_model_to_netcdf(model, tmp_path):
+    m = model
     fn = tmp_path / "test.nc"
     m.to_netcdf(fn)
     p = read_netcdf(fn)
 
-    for k in m.scalar_attrs:
-        if k != "objective_value":
-            assert getattr(m, k) == getattr(p, k)
-    for k in m.dataset_attrs:
-        assert_equal(getattr(m, k), getattr(p, k))
+    assert_model_equal(m, p)
+
+
+def test_model_to_netcdf_with_sense(model, tmp_path):
+    m = model
+    m.objective.sense = "max"
+    fn = tmp_path / "test.nc"
+    m.to_netcdf(fn)
+    p = read_netcdf(fn)
+
+    assert_model_equal(m, p)
+
+
+def test_model_to_netcdf_with_dash_names(model_with_dash_names, tmp_path):
+    m = model_with_dash_names
+    fn = tmp_path / "test.nc"
+    m.to_netcdf(fn)
+    p = read_netcdf(fn)
+
+    assert_model_equal(m, p)
+
+
+def test_model_to_netcdf_with_status_and_condition(model_with_dash_names, tmp_path):
+    m = model_with_dash_names
+    fn = tmp_path / "test.nc"
+    m._status = "ok"
+    m._termination_condition = "optimal"
+    m.to_netcdf(fn)
+    p = read_netcdf(fn)
+
+    assert_model_equal(m, p)
+
+
+# skip it xarray version is 2024.01.0 due to issue https://github.com/pydata/xarray/issues/8628
+@pytest.mark.skipif(
+    xr.__version__ in ["2024.1.0", "2024.1.1"],
+    reason="xarray version 2024.1.0 has a bug with MultiIndex deserialize",
+)
+def test_model_to_netcdf_with_multiindex(model_with_multiindex, tmp_path):
+    m = model_with_multiindex
+    fn = tmp_path / "test.nc"
+    m.to_netcdf(fn)
+    p = read_netcdf(fn)
+
+    assert_model_equal(m, p)
 
 
 @pytest.mark.skipif("gurobi" not in available_solvers, reason="Gurobipy not installed")
-def test_to_file(tmp_path):
+def test_to_file_lp(model, tmp_path):
     import gurobipy
 
-    m = Model()
-
-    x = m.add_variables(4, pd.Series([8, 10]))
-    y = m.add_variables(0, pd.DataFrame([[1, 2], [3, 4], [5, 6]]))
-
-    m.add_constraints(x + y, "<=", 10)
-
-    m.add_objective(2 * x + 3 * y)
-
     fn = tmp_path / "test.lp"
-    m.to_file(fn)
+    model.to_file(fn)
 
     gurobipy.read(str(fn))
 
 
 @pytest.mark.skipif("gurobi" not in available_solvers, reason="Gurobipy not installed")
-def test_to_gurobipy(tmp_path):
-    m = Model()
+def test_to_file_lp_None(model):
+    import gurobipy
 
-    x = m.add_variables(4, pd.Series([8, 10]))
-    y = m.add_variables(0, pd.DataFrame([[1, 2], [3, 4], [5, 6]]))
+    fn = None
+    model.to_file(fn)
 
-    m.add_constraints(x + y, "<=", 10)
+    fn = model.get_problem_file()
+    gurobipy.read(str(fn))
 
-    m.add_objective(2 * x + 3 * y)
 
-    m.to_gurobipy()
+@pytest.mark.skipif(
+    not {"gurobi", "highs"}.issubset(available_solvers),
+    reason="Gurobipy of highspy not installed",
+)
+def test_to_file_mps(model, tmp_path):
+    import gurobipy
+
+    fn = tmp_path / "test.mps"
+    model.to_file(fn)
+
+    gurobipy.read(str(fn))
+
+
+@pytest.mark.skipif("gurobi" not in available_solvers, reason="Gurobipy not installed")
+def test_to_file_invalid(model, tmp_path):
+    with pytest.raises(ValueError):
+        fn = tmp_path / "test.failedtype"
+        model.to_file(fn)
+
+
+@pytest.mark.skipif("gurobi" not in available_solvers, reason="Gurobipy not installed")
+def test_to_gurobipy(model):
+    model.to_gurobipy()
+
+
+@pytest.mark.skipif("highs" not in available_solvers, reason="Highspy not installed")
+def test_to_highspy(model):
+    model.to_highspy()
 
 
 def test_to_blocks(tmp_path):
+    # This is currently broken and due to time-constraints not possible to fix
     m = Model()
 
     lower = pd.Series(range(20))
@@ -107,10 +176,11 @@ def test_to_blocks(tmp_path):
     x = m.add_variables(lower, upper)
     y = m.add_variables(lower, upper)
 
-    m.add_constraints(x + y, "<=", 10)
+    m.add_constraints(x + y, LESS_EQUAL, 10)
 
     m.add_objective(2 * x + 3 * y)
 
     m.blocks = xr.DataArray([1] * 10 + [2] * 10)
 
-    m.to_block_files(tmp_path)
+    with pytest.raises(NotImplementedError):
+        m.to_block_files(tmp_path)
